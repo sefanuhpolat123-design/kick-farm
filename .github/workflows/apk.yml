@@ -1,53 +1,125 @@
 name: build-apk
+
 on:
-  push:
-    paths:
-      - "*.zip"
+  release:
+    types: [published]
   workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - '.github/workflows/apk.yml'
+
 permissions:
   contents: write
-concurrency: apk-build
+
 jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
-      - name: SDK hazirla
-        run: |
-          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
-          if [ -x "$SM" ]; then
-            yes | "$SM" --licenses > /dev/null 2>&1 || true
-            "$SM" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
-          fi
-      - name: ZIP ac
-        run: |
-          ZIP=$(find . -maxdepth 2 -name "*.zip" -not -path "./.git/*" | head -1)
-          [ -n "$ZIP" ] || { echo "repoda zip yok"; exit 1; }
-          mkdir -p /tmp/src && unzip -qo "$ZIP" -d /tmp/src
-          P=$(find /tmp/src -maxdepth 2 -name settings.gradle.kts -printf '%h\n' | head -1)
-          [ -n "$P" ] || { echo "zip icinde proje yok"; exit 1; }
-          echo "PROJ=$P" >> "$GITHUB_ENV"
-      - name: Derle
-        run: |
-          cd "$PROJ"
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          gradle assembleDebug --no-daemon -x lint
-      - name: APK topla
-        run: cp "$(find "$PROJ" -name app-debug.apk | head -1)" /tmp/kickfarm.apk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: kickfarm-apk
-          path: /tmp/kickfarm.apk
-      - name: Indirmeye ac
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Kaynak hazırla (zip varsa onu kullan, yoksa repo)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view build > /dev/null 2>&1 || gh release create build --title "APK" --notes "son build"
-          gh release upload build /tmp/kickfarm.apk --clobber
+          set -e
+          mkdir -p /tmp/buildsrc
+
+          USED_ZIP=0
+          if [ "${{ github.event_name }}" = "release" ]; then
+            cd /tmp/buildsrc
+            gh release download "${{ github.event.release.tag_name }}" \
+              -R "${{ github.repository }}" -p "*.zip" --clobber 2>/dev/null || true
+            ZIP=$(ls -t *.zip 2>/dev/null | head -1 || true)
+            if [ -n "$ZIP" ]; then
+              echo "==> Release zip kullanılıyor: $ZIP"
+              unzip -qo "$ZIP"
+              USED_ZIP=1
+            fi
+          fi
+
+          if [ "\( USED_ZIP" = "0" ] && [ " \){{ github.event_name }}" = "workflow_dispatch" ]; then
+            cd /tmp/buildsrc
+            gh release download -R "${{ github.repository }}" -p "*.zip" --clobber 2>/dev/null || true
+            ZIP=$(ls -t *.zip 2>/dev/null | head -1 || true)
+            if [ -n "$ZIP" ]; then
+              echo "==> En son release zip kullanılıyor: $ZIP"
+              unzip -qo "$ZIP"
+              USED_ZIP=1
+            fi
+          fi
+
+          if [ "$USED_ZIP" = "0" ]; then
+            echo "==> Zip bulunamadı, repo kaynağı kullanılıyor"
+            cp -a "$GITHUB_WORKSPACE/." /tmp/buildsrc/
+          fi
+
+          echo "==> Kaynak ağacı:"
+          find /tmp/buildsrc -maxdepth 4 -type f | head -50
+
+      - name: Gradle ile APK derle
+        run: |
+          set -e
+          ROOT=$(find /tmp/buildsrc -name settings.gradle.kts -printf '%h\n' | head -1)
+          if [ -z "$ROOT" ]; then
+            echo "HATA: settings.gradle.kts bulunamadı"
+            find /tmp/buildsrc -type f | head -80
+            exit 1
+          fi
+          echo "==> Proje kökü: $ROOT"
+          cd "$ROOT"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+          echo "==> Üretilen APK'lar:"
+          find . -name "*.apk" -type f
+
+      - name: APK artifact yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: kickfarm-apk
+          path: |
+            **/app/build/outputs/apk/debug/*.apk
+            **/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Release'e APK ekle
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          APK=$(find /tmp/buildsrc -name "app-debug.apk" -o -name "*-debug.apk" | head -1)
+          if [ -z "$APK" ]; then
+            APK=$(find /tmp/buildsrc -name "*.apk" | head -1)
+          fi
+          if [ -n "$APK" ]; then
+            echo "Yükleniyor: $APK"
+            gh release upload "${{ github.event.release.tag_name }}" "$APK" --clobber
+            echo "APK release'e eklendi."
+          else
+            echo "HATA: APK bulunamadı"
+            exit 1
+          fi
