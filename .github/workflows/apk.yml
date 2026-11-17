@@ -1,0 +1,40 @@
+name: build-apk
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v3
+      - name: Kaynak ZIP indir
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p src && cd src
+          gh release download "${{ github.event.release.tag_name }}" -R "${{ github.repository }}" -p "*.zip" --clobber
+          unzip -qo *.zip
+      - name: Derle
+        run: |
+          cd src
+          P=$(find . -maxdepth 2 -name settings.gradle.kts -printf '%h\n' | head -1)
+          cd "$P"
+          gradle assembleDebug --no-daemon
+      - name: Release'e APK ekle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=$(find . -name app-debug.apk | head -1)
+          gh release upload "${{ github.event.release.tag_name }}" "$APK" --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kickfarm-apk
+          path: "**/app/build/outputs/apk/debug/app-debug.apk"
