@@ -28,8 +28,45 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # android-actions/setup-android lisans sorusunda takılıyor.
+      # Bu yüzden SDK'yı elle kuruyoruz ve lisansları otomatik kabul ediyoruz.
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          set -e
+          ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+
+          # Command-line tools indir
+          cd /tmp
+          curl -sL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
+          # Klasör adını "latest" yap
+          if [ -d "$ANDROID_HOME/cmdline-tools/cmdline-tools" ]; then
+            mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          export ANDROID_HOME
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+
+          # Lisansları otomatik kabul et
+          yes | sdkmanager --licenses >/dev/null || true
+
+          # Gerekli paketleri yükle
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            >/dev/null
+
+          # Sonraki adımlar için ortam değişkenlerini kaydet
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+
+          echo "Android SDK kuruldu: $ANDROID_HOME"
+          sdkmanager --list_installed | head -20
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -54,7 +91,7 @@ jobs:
             fi
           fi
 
-          if [ "\( USED_ZIP" = "0" ] && [ " \){{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "$USED_ZIP" = "0" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             cd /tmp/buildsrc
             gh release download -R "${{ github.repository }}" -p "*.zip" --clobber 2>/dev/null || true
             ZIP=$(ls -t *.zip 2>/dev/null | head -1 || true)
