@@ -1,14 +1,17 @@
 name: build-apk
 on:
-  release:
-    types: [published]
+  push:
+    paths:
+      - "*.zip"
   workflow_dispatch:
 permissions:
   contents: write
+concurrency: apk-build
 jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -23,29 +26,28 @@ jobs:
             yes | "$SM" --licenses > /dev/null 2>&1 || true
             "$SM" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
           fi
-          ls "$SDK/platforms" 2>/dev/null || echo "platform listesi yok"
-      - name: Kaynak ZIP indir
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: ZIP ac
         run: |
-          mkdir -p src && cd src
-          gh release download "${{ github.event.release.tag_name }}" -R "${{ github.repository }}" -p "*.zip" --clobber
-          unzip -qo *.zip
+          ZIP=$(find . -maxdepth 2 -name "*.zip" -not -path "./.git/*" | head -1)
+          [ -n "$ZIP" ] || { echo "repoda zip yok"; exit 1; }
+          mkdir -p /tmp/src && unzip -qo "$ZIP" -d /tmp/src
+          P=$(find /tmp/src -maxdepth 2 -name settings.gradle.kts -printf '%h\n' | head -1)
+          [ -n "$P" ] || { echo "zip icinde proje yok"; exit 1; }
+          echo "PROJ=$P" >> "$GITHUB_ENV"
       - name: Derle
         run: |
-          cd src
-          P=$(find . -maxdepth 2 -name settings.gradle.kts -printf '%h\n' | head -1)
-          cd "$P"
+          cd "$PROJ"
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
           gradle assembleDebug --no-daemon -x lint
-      - name: Release'e APK ekle
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          APK=$(find . -name app-debug.apk | head -1)
-          [ -n "$APK" ] || { echo "APK yok"; exit 1; }
-          gh release upload "${{ github.event.release.tag_name }}" "$APK" --clobber
+      - name: APK topla
+        run: cp "$(find "$PROJ" -name app-debug.apk | head -1)" /tmp/kickfarm.apk
       - uses: actions/upload-artifact@v4
         with:
           name: kickfarm-apk
-          path: "**/app/build/outputs/apk/debug/app-debug.apk"
+          path: /tmp/kickfarm.apk
+      - name: Indirmeye ac
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view build > /dev/null 2>&1 || gh release create build --title "APK" --notes "son build"
+          gh release upload build /tmp/kickfarm.apk --clobber
