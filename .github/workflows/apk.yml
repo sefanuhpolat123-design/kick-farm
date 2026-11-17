@@ -6,11 +6,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
-    paths:
-      - 'app/**'
-      - 'build.gradle.kts'
-      - 'settings.gradle.kts'
-      - '.github/workflows/apk.yml'
 
 permissions:
   contents: write
@@ -28,19 +23,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # android-actions/setup-android lisans sorusunda takılıyor.
-      # Bu yüzden SDK'yı elle kuruyoruz ve lisansları otomatik kabul ediyoruz.
       - name: Setup Android SDK
         run: |
           set -e
           ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
           mkdir -p "$ANDROID_HOME/cmdline-tools"
 
-          # Command-line tools indir
           cd /tmp
           curl -sL -o cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
           unzip -q cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools"
-          # Klasör adını "latest" yap
           if [ -d "$ANDROID_HOME/cmdline-tools/cmdline-tools" ]; then
             mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
           fi
@@ -49,78 +40,90 @@ jobs:
           export ANDROID_HOME
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
 
-          # Lisansları otomatik kabul et
           yes | sdkmanager --licenses >/dev/null || true
-
-          # Gerekli paketleri yükle
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0" \
             >/dev/null
 
-          # Sonraki adımlar için ortam değişkenlerini kaydet
           echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
           echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
-
-          echo "Android SDK kuruldu: $ANDROID_HOME"
-          sdkmanager --list_installed | head -20
+          echo "Android SDK hazır."
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Kaynak hazırla (zip varsa onu kullan, yoksa repo)
+      - name: Kaynak hazırla
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           mkdir -p /tmp/buildsrc
+          USED_ZIP=""
 
-          USED_ZIP=0
+          # 1) Release asset zip
           if [ "${{ github.event_name }}" = "release" ]; then
             cd /tmp/buildsrc
             gh release download "${{ github.event.release.tag_name }}" \
               -R "${{ github.repository }}" -p "*.zip" --clobber 2>/dev/null || true
             ZIP=$(ls -t *.zip 2>/dev/null | head -1 || true)
             if [ -n "$ZIP" ]; then
-              echo "==> Release zip kullanılıyor: $ZIP"
+              echo "==> Release zip: $ZIP"
               unzip -qo "$ZIP"
-              USED_ZIP=1
+              USED_ZIP="$ZIP"
             fi
           fi
 
-          if [ "$USED_ZIP" = "0" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          # 2) Repo içindeki zip (senin durumun bu)
+          if [ -z "$USED_ZIP" ]; then
+            cd "$GITHUB_WORKSPACE"
+            ZIP=$(ls -t *.zip 2>/dev/null | head -1 || true)
+            if [ -n "$ZIP" ]; then
+              echo "==> Repo içindeki zip kullanılıyor: $ZIP"
+              unzip -qo "$ZIP" -d /tmp/buildsrc
+              USED_ZIP="$ZIP"
+            fi
+          fi
+
+          # 3) Workflow_dispatch + son release
+          if [ -z "$USED_ZIP" ] && [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             cd /tmp/buildsrc
             gh release download -R "${{ github.repository }}" -p "*.zip" --clobber 2>/dev/null || true
             ZIP=$(ls -t *.zip 2>/dev/null | head -1 || true)
             if [ -n "$ZIP" ]; then
-              echo "==> En son release zip kullanılıyor: $ZIP"
+              echo "==> Son release zip: $ZIP"
               unzip -qo "$ZIP"
-              USED_ZIP=1
+              USED_ZIP="$ZIP"
             fi
           fi
 
-          if [ "$USED_ZIP" = "0" ]; then
-            echo "==> Zip bulunamadı, repo kaynağı kullanılıyor"
+          # 4) Hiç zip yoksa repo kaynağı
+          if [ -z "$USED_ZIP" ]; then
+            echo "==> Zip yok, repo kaynağı kopyalanıyor"
             cp -a "$GITHUB_WORKSPACE/." /tmp/buildsrc/
           fi
 
-          echo "==> Kaynak ağacı:"
-          find /tmp/buildsrc -maxdepth 4 -type f | head -50
+          echo "==> /tmp/buildsrc içeriği:"
+          find /tmp/buildsrc -maxdepth 4 \( -name "*.kt" -o -name "*.kts" -o -name "*.xml" -o -name "*.gradle*" \) | head -40
+          echo "---"
+          find /tmp/buildsrc -maxdepth 3 -type d | head -30
 
       - name: Gradle ile APK derle
         run: |
           set -e
           ROOT=$(find /tmp/buildsrc -name settings.gradle.kts -printf '%h\n' | head -1)
           if [ -z "$ROOT" ]; then
-            echo "HATA: settings.gradle.kts bulunamadı"
-            find /tmp/buildsrc -type f | head -80
+            echo "HATA: settings.gradle.kts hâlâ bulunamadı"
+            echo "Tüm dosyalar:"
+            find /tmp/buildsrc -type f | head -100
             exit 1
           fi
           echo "==> Proje kökü: $ROOT"
           cd "$ROOT"
+          ls -la
 
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
@@ -129,7 +132,7 @@ jobs:
             gradle assembleDebug --no-daemon --stacktrace
           fi
 
-          echo "==> Üretilen APK'lar:"
+          echo "==> APK'lar:"
           find . -name "*.apk" -type f
 
       - name: APK artifact yükle
@@ -148,14 +151,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          APK=$(find /tmp/buildsrc -name "app-debug.apk" -o -name "*-debug.apk" | head -1)
+          APK=$(find /tmp/buildsrc -name "*debug*.apk" | head -1)
           if [ -z "$APK" ]; then
             APK=$(find /tmp/buildsrc -name "*.apk" | head -1)
           fi
           if [ -n "$APK" ]; then
             echo "Yükleniyor: $APK"
             gh release upload "${{ github.event.release.tag_name }}" "$APK" --clobber
-            echo "APK release'e eklendi."
           else
             echo "HATA: APK bulunamadı"
             exit 1
